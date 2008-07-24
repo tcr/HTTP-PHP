@@ -159,6 +159,42 @@ class HTTPRequest extends HTTPMessage {
 			// input from php://input stream
 			$request->setContent(file_get_contents('php://input'));
 		}
+		
+		//==============================================================
+		// HTTP.ini fixes
+		
+#[TODO] better specify this format
+		// fix browser Accept: strings
+		if ($agent = $request->getUserAgentInfo()) {
+			// get override
+			$accept = Chowdah::getConfigSetting('accept');
+			if ($override = $accept[$agent->browser][$agent->majorver])
+				$request->setHeader('Accept', $override);
+		}
+		
+		// html form compatibility
+		if (Chowdah::getConfigSetting('html_form_compat'))
+		{
+			// set method
+			if (is_string($request->parsedContent['request_method']))
+				$request->setMethod($request->parsedContent['request_method']);
+			// set content
+			if ($request->parsedContent['request_content'] instanceof IDocument)
+				$request->setContentAsDocument($request->parsedContent['request_content']);
+			else if ($request->parsedContent['request_content'] && $request->parsedContent['request_content_type'])
+			{
+				$doc = new VirtualDocument;
+				$doc->setContent($request->parsedContent['request_content']);
+				$doc->setContentType(MIMEType::parse($request->parsedContent['request_content_type']));
+				$request->setContentAsDocument($doc);
+			}
+		}
+		
+		// HTTP Authorization header workaround
+		if (!function_exists('getallheaders') && !$_SERVER['HTTP_AUTHORIZATION']
+		    && Chowdah::getConfigSetting('auth_header_key'))
+			$request->setHeader('Authorization', $_SERVER[Chowdah::getConfigSetting('auth_header_key')]);
+		
 
 		// return the request
 		return $request;
