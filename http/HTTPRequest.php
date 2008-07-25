@@ -15,6 +15,7 @@ class HTTPRequest extends HTTPMessage {
 		$this->setMethod($method);
 		$this->setURL($url ? $url : new URL());
 		$this->setHTTPVersion($version);
+		
 		// call parent constructor
 		parent::__construct();
 	}
@@ -90,12 +91,54 @@ class HTTPRequest extends HTTPMessage {
 		// return the HTTPResponse object
 		return HTTPResponse::parse($response);
 	}
+	
+#[TODO] what other fixes possible?
+	public function applyFixes()
+	{
+		// load configuration data
+		if (!($config = @parse_ini_file(dirname(__FILE__) . '/http.ini')))
+			return false;
+	
+		// fix browser Accept: strings
+		if ($agent = $request->getUserAgentInfo())
+		{
+			// get overrides
+			$accept = $config['accept'];
+			if ($override = $accept[$agent->browser][$agent->majorver])
+				$this->setHeader('Accept', $override);
+		}
+		
+		// html form compatibility
+		if ($config['post_tunneling'])
+		{
+			// set method
+			if (is_string($request->parsedContent['request_method']))
+				$this->setMethod($request->parsedContent['request_method']);
+			
+			// set content
+			if ($this->parsedContent['request_content'] instanceof MultipartFormDataFile)
+			{
+				$this->setContent($this->parsedContent['request_content']->content);
+				$this->setContentType($this->parsedContent['request_content']->type);
+			}
+			else if ($this->parsedContent['request_content'] && $request->parsedContent['request_content_type'])
+			{
+				$this->setContent($this->parsedContent['request_content']);
+				$this->setContentType(MIMEType::parse($this->parsedContent['request_content_type']));
+			}
+		}
+		
+		// HTTP Authorization header workaround
+		if (!function_exists('getallheaders') && !$_SERVER['HTTP_AUTHORIZATION'] && $config['auth_header_key'])
+			$this->setHeader('Authorization', $_SERVER[$config['auth_header_key']]);
+	}
 
 	//------------------------------------------------------------------
 	// request creation
 	//------------------------------------------------------------------
 
-	static public function getCurrent() {
+	static public function getCurrent()
+	{
 		// create a new request object
 		$request = new HTTPRequest($_SERVER['REQUEST_METHOD']);
 		
@@ -114,11 +157,14 @@ class HTTPRequest extends HTTPMessage {
 		    )));
 
 		// set headers
-		if (function_exists('getallheaders')) {
+		if (function_exists('getallheaders'))
+		{
 			// set all headers (only available when running as Apache)
 			foreach (getallheaders() as $key => $value)
 				$request->setHeader($key, $value);
-		} else {
+		}
+		else
+		{
 			// extract headers from $_SERVER array
 			// (entries formatted as HTTP_* are interpreted as HTTP headers)
 			foreach (preg_grep('/^HTTP_/i', array_keys($_SERVER)) as $key)
@@ -137,65 +183,36 @@ class HTTPRequest extends HTTPMessage {
 		}
 
 		// set the content
-		if (isset($_SERVER['HTTP_RAW_POST_DATA'])) {
+		if (isset($_SERVER['HTTP_RAW_POST_DATA']))
+		{
 			// get from HTTP_RAW_POST_DATA variable
 			$request->setContent($_SERVER['HTTP_RAW_POST_DATA']);
-		} else if (isset($_SERVER['CONTENT_TYPE']) &&
-		    MIMEType::parse($_SERVER['CONTENT_TYPE'])->match(new MIMEType('multipart', 'form-data'))) {
+		}
+		else if (isset($_SERVER['CONTENT_TYPE']) && MIMEType::create('multipart', 'form-data')->match(MIMEType::parse($_SERVER['CONTENT_TYPE'])))
+		{
 			// load the POST data
-			$data = strip_magic_quotes($_POST);
+			$data = new MultipartFormData(strip_magic_quotes($_POST));
 			// convert $_FILES array to file object
 			foreach ($_FILES as $name => $fileData) {
-				// create a virtual document from the data
-				$file = new VirtualDocument();
-				$file->setPath($name);
-				$file->setMIMEType(MIMEType::parse($fileData['type']));
-				$file->setContent(file_get_contents($fileData['tmp_name']));
-				$data[] = $file;
-			}		    
+				// create a file object from the data
+				$data[$name] = $file = new MultipartFormDataFile();
+				$file->filename = $fileData['name'];
+				$file->type = MIMEType::parse($fileData['type']);
+				$file->content = file_get_contents($fileData['tmp_name']);
+			}
 			// reconstruct submitted data
 			$request->setParsedContent($data, new MIMEType('multipart', 'form-data'));
-		} else if ((int) $_SERVER['CONTENT_LENGTH']) {
+		}
+		else if ((int) $_SERVER['CONTENT_LENGTH'])
+		{
 			// input from php://input stream
 			$request->setContent(file_get_contents('php://input'));
 		}
 		
-		//==============================================================
-		// HTTP.ini fixes
+		// apply specialized fixes
+#[TODO] make this optional?
+		$request->applyFixes();
 		
-#[TODO] better specify this format
-		// fix browser Accept: strings
-		if ($agent = $request->getUserAgentInfo()) {
-			// get override
-			$accept = Chowdah::getConfigSetting('accept');
-			if ($override = $accept[$agent->browser][$agent->majorver])
-				$request->setHeader('Accept', $override);
-		}
-		
-		// html form compatibility
-		if (Chowdah::getConfigSetting('html_form_compat'))
-		{
-			// set method
-			if (is_string($request->parsedContent['request_method']))
-				$request->setMethod($request->parsedContent['request_method']);
-			// set content
-			if ($request->parsedContent['request_content'] instanceof IDocument)
-				$request->setContentAsDocument($request->parsedContent['request_content']);
-			else if ($request->parsedContent['request_content'] && $request->parsedContent['request_content_type'])
-			{
-				$doc = new VirtualDocument;
-				$doc->setContent($request->parsedContent['request_content']);
-				$doc->setContentType(MIMEType::parse($request->parsedContent['request_content_type']));
-				$request->setContentAsDocument($doc);
-			}
-		}
-		
-		// HTTP Authorization header workaround
-		if (!function_exists('getallheaders') && !$_SERVER['HTTP_AUTHORIZATION']
-		    && Chowdah::getConfigSetting('auth_header_key'))
-			$request->setHeader('Authorization', $_SERVER[Chowdah::getConfigSetting('auth_header_key')]);
-		
-
 		// return the request
 		return $request;
 	}
@@ -237,12 +254,10 @@ class HTTPRequest extends HTTPMessage {
 	//------------------------------------------------------------------
 
 	public function getURL() {
-		// return the http url
 		return $this->url;
 	}
 
 	public function setURL(URL $url) {
-		// set the url
 		return $this->url = $url;
 	}
 
@@ -256,7 +271,6 @@ class HTTPRequest extends HTTPMessage {
 	}
 
 	public function setParsedQueryData($data) {
-		// build the query
 		$this->getURL()->query = http_build_query($data);
 		return $this->getURL()->query;
 	}
@@ -399,7 +413,7 @@ class HTTPRequest extends HTTPMessage {
 		return call_user_func($callback, $type, $args);
 	}
 	
-	#[TODO] further do this. setAuthorization(), authorize()
+#[TODO] further do this. setAuthorization(), authorize()
 
 	//------------------------------------------------------------------
 	// variable overloading
@@ -407,24 +421,15 @@ class HTTPRequest extends HTTPMessage {
 
 	function __get($key) {
 		switch ($key) {
-			case 'url':
-				return $this->getURL();
-				
-			case 'parsedQueryData':
-				return $this->getParsedQueryData();
-				
-			default:
-				return parent::__get($key);
+			case 'parsedQueryData': return $this->getParsedQueryData();
+			default: return parent::__get($key);
 		}
 	}
 
 	function __set($key, $value) {
 		switch ($key) {
-			case 'parsedQueryData':
-				return $this->setParsedQueryData($value);
-				
-			default:
-				return parent::__set($key, $value);
+			case 'parsedQueryData': return $this->setParsedQueryData($value);
+			default: return parent::__set($key, $value);
 		}
 	}
 }

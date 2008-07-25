@@ -234,6 +234,7 @@ abstract class HTTPMessage {
 		}
 	}
 	
+#[TODO] registerContentEncoder
 	public function getDecodedContent() {
 		// check that there is content to decode
 		if ($this->getContent() === null)
@@ -292,7 +293,8 @@ abstract class HTTPMessage {
 	//----------------------------------------------------------------------
 	// parsed content
 	//----------------------------------------------------------------------
-	
+
+#[TODO] clear this cache?
 	protected $parsedContentCache = null;
 
 	public function getParsedContent() {
@@ -303,77 +305,19 @@ abstract class HTTPMessage {
 		// set error handler to check for bad requests
 		set_error_handler(array('HTTPMessage', 'parsedContentErrorHandler'), error_reporting());
 		
-		// return a parsed representation of the content (based on MIME type)
-		$parsedContent = $this->getContent();
-		switch ($this->getContentType()->serialize(false))
+		// get a parsed representation of the content (based on MIME type)
+		$content = $this->getContent();
+		if ($parserClass = HTTPMessage::$contentParser[$type->serialize(false)])
 		{
-			case 'application/x-www-form-urlencoded':
-				// parse the content
-				$parsedContent = http_parse_query($this->getContent());
-				break;
-				
-			case 'multipart/form-data':
-				// return the parsed form data
-				$data = array();
-
-				// get the sections
-				$sections = preg_split('/\r\n--' . preg_quote($this->getContentType()->params['boundary']) .
-				    '(\r\n|--$)/', $this->getContent(), -1, PREG_SPLIT_NO_EMPTY);
-				// parse each section
-				foreach ($sections as $section) {
-					// split the header and body
-					list ($head, $content) = explode('/\r\n\r\n/', $section, 2);
-					// get the headers
-					preg_match_all('/(?<=^|\n)([^:]+):\s*(.*?)(?:\r\n|$)/s', $head, $matches, PREG_PATTERN_ORDER);
-					$headers = array_change_key_case((array) array_combine($matches[1], $matches[2]), CASE_LOWER);
-
-					// parse the disposition header
-					if (!preg_match('/form-data\s*(.*)$/s', $headers['content-disposition'], $matches))
-						continue;
-					preg_match_all('/\s*;\s*([^=]+)\s*=\s*"((?<=")[^"]*(?=")|[^;]+)/',
-					    $matches[1], $matches, PREG_PATTERN_ORDER);
-					$disposition = (array) array_combine($matches[1], $matches[2]);
-
-					// parse the content
-					if (strlen($disposition['filename'])) {
-						// entry is a file, so create a virtual document
-						$file = new VirtualDocument();
-						$file->setContents($content);
-						$file->setMIMEType($headers['content-type'] ?
-						    MIMEType::parse($headers['content-type']) : MIMEType::create('text', 'plain'));
-						$file->setPath($disposition['filename']);
-						// save the entry
-						$data[$disposition['name']] = $file;
-					} else
-						// entry is a data value
-						$data[$disposition['name']] = $content;
-				}
-
-				$parsedContent = $data;
-				break;
-
-			case 'text/xml':
-			case 'application/xml':
-			case 'application/xhtml+xml':
-				$parsedContent = new DOMDocument();
-				$parsedContent->loadXML($this->getContent());
-				break;
-
-			case 'text/html':
-				$parsedContent = new DOMDocument();
-				$content = $this->getContent();
-				if (function_exists('mb_convert_encoding'))
-					$content = mb_convert_encoding($content, 'HTML-ENTITIES', mb_detect_encoding($content)); 
-				else 
-					$content = '<meta http-equiv="content-type" content="text/html; charset=utf-8">' . $content;
-				$parsedContent->loadHTML($content);
-				break;
+			// parse using a converter
+			$parser = new $parserClass;
+			$content = $parser->parse($content, $this->getContentType());
 		}
 		
 		// restore Chowdah error handler
 		restore_error_handler();	
 		// cache and return the content
-		return ($this->parsedContentCache = $parsedContent);
+		return ($this->parsedContentCache = $content);
 	}
 	
 	public static function parsedContentErrorHandler($errno, $errstr, $errfile, $errline)
@@ -386,96 +330,31 @@ abstract class HTTPMessage {
 			throw new HTTPStatusException(HTTPStatus::BAD_REQUEST, 'Bad Request', 'The submitted content body was malformed.');
 	}
 
-	public function setParsedContent($data, $type = null) {
-#[TODO] should this be based on data type?
-		// get the content mimetype
+	public function setParsedContent($data, MIMEType $type = null) {
+		// set content type
 		if ($type)
 			$this->setContentType($type);
-		else
-			$type = $this->getContentType();
-
-		// set a parsed representation of the content (based on MIME type)
-		switch ($type->serialize(false)) {
-			case 'application/x-www-form-urlencoded':
-				// convert the data
-				$this->setContent(http_build_query($data));
-				break;
-
-#[TODO] MultipartFormData class!
-			case 'multipart/form-data':
-				// reconstruct from submitted data
-				$this->setContent('');
-				// get the boundary key, or generate one
-				$boundary = isset($type->params['boundary']) ? $type->params['boundary'] :
-				    '-----------------------=_' . mt_rand();
-				    
-				// iterate the form data
-				foreach ((array) $data as $name => $entry) {
-					// check the type of entry
-					if ($entry instanceof IDocument) {
-						// add the file data
-						$this->appendContent('--' . $boundary . "\r\n" .
-						    'Content-Disposition: form-data; name="' . $name . '";' .
-						    'filename="' . urlencode($entry->getFilename()) . "\"\r\n" .
-						    'Content-Type: ' . $entry->getMIMEType()->serialize() . "\r\n\r\n" .
-						   $entry->getContent() . "\r\n");
-					} else {
-						// add the form data
-						foreach (explode('&', http_build_query($entry, '', '&')) as $value) {
-							list ($name, $value) = explode('=', $value);
-							$this->appendContent('--' . $boundary . "\r\n" .
-							    'Content-Disposition: form-data;name="' . $name . "\"\r\n\r\n" .
-							    $value . "\r\n");
-						}
-					}
-				}	
-				// end multipart data
-				$this->appendContent('--' . $boundary . "--\r\n");
-				break;
-
-			case 'text/xml':
-			case 'application/xml':
-			case 'application/xhtml+xml':
-				if ($data instanceof SimpleXMLElement)
-					$data = dom_import_simplexml($data)->ownerDocument;
-				if ($data instanceof DOMDocument)
-					$data->formatOutput = true;
-				$this->setContent($data->saveXML());
-				break;
-
-			case 'text/html':
-				$data->formatOutput = true;
-				$this->setContent($data->saveHTML());
-				break;
-
-			default:
-				$this->setContent($data);
-				break;
+			
+		// get a serialized representation of the content (based on MIME type)
+		$content = $data;
+		if ($parserClass = HTTPMessage::$contentParser[$type->serialize(false)])
+		{
+			// serialize using a converter
+			$parser = new $parserClass;
+			$content = $parser->serialize($data, $this->getContentType());
 		}
 		
+		// set content
+		$this->setContent($content);
 		// save data in cache
 		return ($this->parsedContentCache = $data);
 	}
-
-	//----------------------------------------------------------------------
-	// content as document
-	//----------------------------------------------------------------------
 	
-	public function getContentAsDocument() {
-		// get file path
-		$path = ($this instanceof HTTPRequest ? basename($this->getURL()->path) : null);
-		// create a virtual document of the entity
-		$document = new VirtualDocument($path);
-		$document->setContentType($this->getContentType());
-		$document->setContent($this->getDecodedContent());
-#[TODO] add last-modified time reading!
-		return $document;
-	}
-
-	public function setContentAsDocument(IDocument $document) {
-		// load the document content as a message entity
-		$this->setContentType($document->getContentType());
-		$this->setContent($document->getContent());
+	static protected function $contentParser = array();
+	
+	static public function registerContentParser(MIMEType $type, $class)
+	{
+		HTTPMessage::$contentParser[$type->serialize(false)] = $class;
 	}
 
 	//----------------------------------------------------------------------
@@ -519,32 +398,40 @@ abstract class HTTPMessage {
 	// variable overloading
 	//----------------------------------------------------------------------
 
-	function __get($key) {
-		switch ($key) {
-			case 'headers':
-				return $this->headers;
-
-			case 'cookies':
-				return $this->cookies;
-			
-			case 'parsedContent':
-				return $this->getParsedContent();
+	function __get($key)
+	{
+		switch ($key)
+		{
+			case 'headers': return $this->headers;
+			case 'cookies': return $this->cookies;
+			case 'parsedContent': return $this->getParsedContent();
 		}
 	}
 
 	function __set($key, $value) {
 		switch ($key) {
-			case 'parsedContent':
-				return $this->setParsedContent($value);
+			case 'parsedContent': return $this->setParsedContent($value);
 		}
 	}
 }
 
 //==============================================================================
+// content converters
+//==============================================================================
+
+HTTPMessage::registerContentParser(new MIMEType('text', 'xml'), 'ApplicationXMLParser');
+HTTPMessage::registerContentParser(new MIMEType('application', 'xml'), 'ApplicationXMLParser');
+HTTPMessage::registerContentParser(new MIMEType('application', 'xhtml+xml'), 'ApplicationXMLParser');
+HTTPMessage::registerContentParser(new MIMEType('text', 'html'), 'TextHTMLParser');
+HTTPMessage::registerContentParser(new MIMEType('multipart', 'form-data'), 'MultipartFormDataParser');
+HTTPMessage::registerContentParser(new MIMEType('application', 'x-www-form-urlencoded'), 'ApplicationWWWFormUrlencodedParser');
+
+//==============================================================================
 // http functions
 //==============================================================================
 
-function http_parse_query($query, $arg_separator = null) {
+function http_parse_query($query, $arg_separator = null) 
+{
 	// get the arg separator
 	if (strlen($arg_separator))
 		$query = str_replace(array('&', $arg_separator), array('\&', '&'), $query);
@@ -558,7 +445,8 @@ function http_parse_query($query, $arg_separator = null) {
 	return strip_magic_quotes($data);
 }
 
-function strip_magic_quotes($array, $isTopLevel = true) {
+function strip_magic_quotes($array, $isTopLevel = true)
+{
 	// see: http://us2.php.net/manual/en/function.get-magic-quotes-gpc.php#49612
 	$isMagic = get_magic_quotes_gpc();
 	$cleanArray = array();

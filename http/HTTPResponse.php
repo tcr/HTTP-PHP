@@ -14,6 +14,7 @@ class HTTPResponse extends HTTPMessage {
 		// set variables
 		$this->setHTTPVersion($version);
 		$this->setStatus($statusCode, $reasonPhrase);
+		
 		// call parent constructor
 		parent::__construct();
 	}
